@@ -26,6 +26,7 @@ package com.codename1.tools.skindesigner;
 import com.codename1.components.FloatingHint;
 import com.codename1.components.ImageViewer;
 import com.codename1.components.OnOffSwitch;
+import com.codename1.components.ScaleImageButton;
 import com.codename1.components.ScaleImageLabel;
 import com.codename1.components.ToastBar;
 import com.codename1.io.FileSystemStorage;
@@ -38,6 +39,7 @@ import com.codename1.io.Log;
 import com.codename1.io.Properties;
 import com.codename1.io.Storage;
 import com.codename1.io.Util;
+import com.codename1.system.NativeLookup;
 import com.codename1.ui.Button;
 import com.codename1.ui.Command;
 import com.codename1.ui.Container;
@@ -255,25 +257,25 @@ public class SkinDesigner {
         left.addActionListener(e -> {
             int newX = x.getAsInt(0) - 1;
             x.setText("" + newX);
-            overlay.setImage(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
+            overlay.setImageNoReposition(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
         });
 
         right.addActionListener(e -> {
             int newX = x.getAsInt(0) + 1;
             x.setText("" + newX);
-            overlay.setImage(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
+            overlay.setImageNoReposition(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
         });
 
         up.addActionListener(e -> {
             int newY = y.getAsInt(0) - 1;
             y.setText("" + newY);
-            overlay.setImage(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
+            overlay.setImageNoReposition(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
         });
 
         down.addActionListener(e -> {
             int newY = y.getAsInt(0) + 1;
             y.setText("" + newY);
-            overlay.setImage(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
+            overlay.setImageNoReposition(createMute(x.getAsInt(0), y.getAsInt(0), w, h, img));
         });
 
         editPosition.add(BorderLayout.CENTER, LayeredLayout.encloseIn(iv, overlay,
@@ -305,10 +307,12 @@ public class SkinDesigner {
         Picker nativeTheme = new Picker();
         nativeTheme.setStrings(NATIVE_THEMES);
         nativeTheme.setSelectedString(NATIVE_THEMES[0]);
+        nativeTheme.setRenderingPrototype("XXXXXXXXXXXXXXXXXXX");
 
         Picker platformName = new Picker();
         platformName.setStrings("ios", "and", "win","rim", "se");
         platformName.setSelectedString("ios");
+        platformName.setRenderingPrototype("XXXX");
 
         OnOffSwitch tablet = new OnOffSwitch();
         tablet.setValue(false);
@@ -326,14 +330,17 @@ public class SkinDesigner {
         Picker overrideNamePrimary = new Picker();
         overrideNamePrimary.setStrings("phone", "tablet", "desktop");
         overrideNamePrimary.setSelectedString("phone");
+        overrideNamePrimary.setRenderingPrototype("XXXXXXXX");
 
         Picker overrideNameSecondary = new Picker();
         overrideNameSecondary.setStrings("ios", "android", "windows");
         overrideNameSecondary.setSelectedString("ios");
+        overrideNameSecondary.setRenderingPrototype("XXXXXXXX");
         
         Picker overrideNameLast = new Picker();
         overrideNameLast.setStrings("iphone", "ipad", "android-phone", "android-tablet", "desktop");
         overrideNameLast.setSelectedString("iphone");
+        overrideNameLast.setRenderingPrototype("XXXXXXXX");
         
         
         Container settingsContainer = BoxLayout.encloseY(
@@ -374,19 +381,29 @@ public class SkinDesigner {
         details.setTabSelectedIcon(0, portraitIconSel);
         details.setTabSelectedIcon(1, landscapeIconSel);
         details.setTabSelectedIcon(2, settingsIconSel);
-
         
-        
-        skinDesignerForm.getToolbar().addCommandToRightBar("", 
-                FontImage.createMaterial(FontImage.MATERIAL_SAVE, titleCommand), e -> {
-                    byte[] data = createSkinFile(imPortrait, imLandscape, nativeTheme, platformName, tablet, systemFontFamily, 
-                            proportionalFontFamily, monospaceFontFamily, smallFontSize, mediumFontSize, largeFontSize, 
-                            pixelRatio, overrideNamePrimary, overrideNameSecondary, overrideNameLast); 
-                    if(data != null) {
-                        StringBuilder uri = new StringBuilder("data:application/vnd.codenameone-skin;base64,");
-                        Display.getInstance().execute(uri.append(Base64.encodeNoNewline(data)).toString());
-                    }
-                });
+        ShouldExecute s = NativeLookup.create(ShouldExecute.class);
+        if(s != null && s.isSupported()) {
+            skinDesignerForm.getToolbar().addCommandToRightBar("", 
+                    FontImage.createMaterial(FontImage.MATERIAL_SAVE, titleCommand), e -> {
+                        byte[] data = createSkinFile(imPortrait, imLandscape, nativeTheme, platformName, tablet, systemFontFamily, 
+                                proportionalFontFamily, monospaceFontFamily, smallFontSize, mediumFontSize, largeFontSize, 
+                                pixelRatio, overrideNamePrimary, overrideNameSecondary, overrideNameLast); 
+                        if(data != null) {
+                            FileSystemStorage fs = FileSystemStorage.getInstance();
+                            try(OutputStream os = fs.openOutputStream(fs.getAppHomePath() + "skin-file.skin")) {
+                                os.write(data);
+                            } catch(IOException err) {
+                                Log.e(err);
+                                ToastBar.showErrorMessage("Error wring skin file " + err);
+                            }
+                            // in the JavaScript port this will trigger the download dialog
+                            if(s.shouldExecute()) {
+                                Display.getInstance().execute(fs.getAppHomePath() + "skin-file.skin");
+                            }
+                        }
+                    });
+        }
 
         if(Display.getInstance().isNativeShareSupported()) {
             skinDesignerForm.getToolbar().addCommandToRightBar("", 
