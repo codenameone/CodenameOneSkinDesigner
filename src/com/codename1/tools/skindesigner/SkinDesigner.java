@@ -26,7 +26,6 @@ package com.codename1.tools.skindesigner;
 import com.codename1.components.FloatingHint;
 import com.codename1.components.ImageViewer;
 import com.codename1.components.OnOffSwitch;
-import com.codename1.components.ScaleImageButton;
 import com.codename1.components.ScaleImageLabel;
 import com.codename1.components.ToastBar;
 import com.codename1.io.FileSystemStorage;
@@ -41,10 +40,10 @@ import com.codename1.io.Properties;
 import com.codename1.io.Storage;
 import com.codename1.io.Util;
 import com.codename1.system.NativeLookup;
+import com.codename1.ui.BrowserComponent;
 import com.codename1.ui.Button;
 import com.codename1.ui.Command;
 import com.codename1.ui.Container;
-import com.codename1.ui.EncodedImage;
 import com.codename1.ui.FontImage;
 import com.codename1.ui.Graphics;
 import com.codename1.ui.Image;
@@ -52,7 +51,7 @@ import com.codename1.ui.Tabs;
 import com.codename1.ui.TextArea;
 import com.codename1.ui.TextField;
 import com.codename1.ui.Toolbar;
-import com.codename1.ui.events.ActionEvent;
+import com.codename1.ui.geom.Rectangle;
 import com.codename1.ui.layouts.BorderLayout;
 import com.codename1.ui.layouts.BoxLayout;
 import com.codename1.ui.layouts.GridLayout;
@@ -61,9 +60,7 @@ import com.codename1.ui.plaf.Style;
 import com.codename1.ui.spinner.Picker;
 import com.codename1.ui.util.ImageIO;
 import com.codename1.ui.validation.NumericConstraint;
-import com.codename1.ui.validation.RegexConstraint;
 import com.codename1.ui.validation.Validator;
-import com.codename1.util.Base64;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -162,8 +159,8 @@ public class SkinDesigner {
         autoSave(screenPositionY, prefix + "Y");
         vl.addConstraint(screenWidthPixels, new NumericConstraint(false, 20, 5000, "Screen size must be a valid integer in the 20-5000 range")).
                 addConstraint(screenHeightPixels, new NumericConstraint(false, 20, 5000, "Screen size must be a valid integer in the 20-5000 range")).
-                addConstraint(screenPositionX, new NumericConstraint(false, 20, 5000, "Screen size must be a valid integer in the 20-5000 range")).
-                addConstraint(screenPositionY, new NumericConstraint(false, 20, 5000, "Screen size must be a valid integer in the 20-5000 range"));
+                addConstraint(screenPositionX, new NumericConstraint(false, 0, 5000, "Screen position must be a valid integer in the 0-5000 range")).
+                addConstraint(screenPositionY, new NumericConstraint(false, 0, 5000, "Screen position must be a valid integer in the 0-5000 range"));
         
         Button aim = new Button();
         FontImage.setMaterialIcon(aim, FontImage.MATERIAL_PAN_TOOL);
@@ -190,7 +187,21 @@ public class SkinDesigner {
 
             @Override
             public Image getSkinImage() {
-                return sl.getIcon();
+                Image img = sl.getIcon();
+                int[] data = img.getRGB();
+                int width = img.getWidth();
+                int height = img.getHeight();
+                Rectangle screen = new Rectangle(screenPositionX.getAsInt(0), screenPositionY.getAsInt(0), 
+                        screenWidthPixels.getAsInt(50), screenHeightPixels.getAsInt(50));
+                for(int x = 0 ; x < width ; x++) {
+                    for(int y = 0 ; y < height ; y++) {
+                        if(screen.contains(x, y, 1, 1)) {
+                            data[y * width + x] = 0;
+                        }
+                    }
+                }
+                
+                return Image.createImage(data, width, height);
             }
             
             @Override
@@ -444,7 +455,7 @@ public class SkinDesigner {
         FontImage settingsIconSel = FontImage.createMaterial(FontImage.MATERIAL_SETTINGS, tabSel, 3.5f);
         details.addTab("Portrait", portraitIcon, imPortrait.getContainer());
         details.addTab("Landscape", landscapeIcon, imLandscape.getContainer());
-        details.addTab("Settings", settingsIcon, settingsContainer);
+        details.addTab("Settings", settingsIcon, settingsContainer);        
         details.setTabSelectedIcon(0, portraitIconSel);
         details.setTabSelectedIcon(1, landscapeIconSel);
         details.setTabSelectedIcon(2, settingsIconSel);
@@ -478,6 +489,15 @@ public class SkinDesigner {
             vl.addSubmitButtons(skinDesignerForm.getToolbar().findCommandComponent(saveCommand));
         }
 
+        skinDesignerForm.getToolbar().addMaterialCommandToLeftBar("", FontImage.MATERIAL_HELP, e -> {
+            BrowserComponent help = new BrowserComponent();
+            help.setURL("jar:///help.html");
+            Form helpForm = new Form("Help", new BorderLayout());
+            helpForm.add(BorderLayout.CENTER, help);
+            helpForm.getToolbar().setBackCommand("Back", ee -> skinDesignerForm.showBack());
+            helpForm.show();
+        });
+        
         if(Display.getInstance().isNativeShareSupported()) {
             skinDesignerForm.getToolbar().addCommandToRightBar("", 
                     FontImage.createMaterial(FontImage.MATERIAL_SHARE, titleCommand), e -> {
