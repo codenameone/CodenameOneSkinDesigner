@@ -1,14 +1,11 @@
 name: AVD Skin Conversion
 
 on:
-  push:
-    paths:
-      - '.github/workflows/avd-skin-conversion.yml'
-      - 'AvdSkinToCodenameOneSkin.java'
   pull_request:
     paths:
       - '.github/workflows/avd-skin-conversion.yml'
       - 'AvdSkinToCodenameOneSkin.java'
+  workflow_dispatch:
 
 jobs:
   convert:
@@ -25,7 +22,7 @@ jobs:
 
       - name: Download sample AVD skin
         run: |
-          curl -L -o skins.zip https://github.com/google/android-emulator-skins/archive/refs/heads/main.zip
+          curl -L --fail -o skins.zip https://codeload.github.com/google/android-emulator-skins/zip/refs/heads/main
           mkdir -p skins
           unzip -q skins.zip "android-emulator-skins-main/Pixel_4/*" -d skins
 

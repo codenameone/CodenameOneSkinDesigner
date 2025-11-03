@@ -52,7 +52,8 @@ public class AvdSkinToCodenameOneSkin {
             error("Output file %s already exists".formatted(outputFile));
         }
 
-        LayoutInfo layoutInfo = LayoutInfo.parse(findLayoutFile(skinDirectory));
+        Path layoutFile = findLayoutFile(skinDirectory);
+        LayoutInfo layoutInfo = LayoutInfo.parse(layoutFile, skinDirectory);
         HardwareInfo hardwareInfo = HardwareInfo.parse(skinDirectory.resolve("hardware.ini"));
 
         if (!layoutInfo.hasBothOrientations()) {
@@ -211,9 +212,9 @@ public class AvdSkinToCodenameOneSkin {
             return portrait != null && landscape != null;
         }
 
-        static LayoutInfo parse(Path layoutFile) {
+        static LayoutInfo parse(Path layoutFile, Path skinDirectory) {
             try {
-                return new LayoutParser().parse(Files.readString(layoutFile));
+                return new LayoutParser(layoutFile, skinDirectory).parse(Files.readString(layoutFile));
             } catch (IOException err) {
                 throw new UncheckedIOException("Failed to read layout file " + layoutFile, err);
             }
@@ -223,6 +224,13 @@ public class AvdSkinToCodenameOneSkin {
     private static class LayoutParser {
         private final EnumMap<OrientationType, OrientationInfoBuilder> builders = new EnumMap<>(OrientationType.class);
         private final Deque<Context> contextStack = new ArrayDeque<>();
+        private final Path skinDirectory;
+        private final Path layoutParent;
+
+        LayoutParser(Path layoutFile, Path skinDirectory) {
+            this.skinDirectory = skinDirectory;
+            this.layoutParent = layoutFile.getParent();
+        }
 
         LayoutInfo parse(String text) {
             String[] lines = text.split("\r?\n");
@@ -263,10 +271,10 @@ public class AvdSkinToCodenameOneSkin {
                 return;
             }
             String key = parts[0];
-            String value = parts[1];
+            String value = unquote(parts[1]);
             String ctxName = ctx.name.toLowerCase(Locale.ROOT);
             if (ctxName.contains("image") && key.equalsIgnoreCase("name")) {
-                builder.imageName = value;
+                builder.considerImage(value, contextStack, this::resolveImagePath);
             } else if (ctxName.contains("display")) {
                 switch (key.toLowerCase(Locale.ROOT)) {
                     case "x" -> builder.displayX = parseInt(value);
@@ -311,12 +319,37 @@ public class AvdSkinToCodenameOneSkin {
             return parts;
         }
 
+        private String unquote(String value) {
+            value = value.trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                return value.substring(1, value.length() - 1);
+            }
+            if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
+                return value.substring(1, value.length() - 1);
+            }
+            return value;
+        }
+
         private int parseInt(String value) {
             try {
                 return Integer.parseInt(value);
             } catch (NumberFormatException err) {
                 throw new IllegalStateException("Invalid integer value '" + value + "' in layout file", err);
             }
+        }
+
+        private Path resolveImagePath(String name) {
+            Path candidate = skinDirectory.resolve(name).normalize();
+            if (Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+            if (layoutParent != null) {
+                Path sibling = layoutParent.resolve(name).normalize();
+                if (Files.isRegularFile(sibling)) {
+                    return sibling;
+                }
+            }
+            return candidate;
         }
 
         private String stripComments(String line) {
@@ -349,17 +382,82 @@ public class AvdSkinToCodenameOneSkin {
         private record Context(String name, OrientationType orientation) {}
 
         private static class OrientationInfoBuilder {
-            String imageName;
+            ImageCandidate selectedImage;
             Integer displayX;
             Integer displayY;
             Integer displayWidth;
             Integer displayHeight;
 
+            void considerImage(String name, Deque<Context> contexts, java.util.function.Function<String, Path> resolver) {
+                ImageCandidate candidate = ImageCandidate.from(name, contexts, resolver);
+                if (selectedImage == null || candidate.isBetterThan(selectedImage)) {
+                    selectedImage = candidate;
+                }
+            }
+
             OrientationInfo build(OrientationType type) {
-                if (imageName == null || displayX == null || displayY == null || displayWidth == null || displayHeight == null) {
+                if (selectedImage == null || displayX == null || displayY == null || displayWidth == null || displayHeight == null) {
                     throw new IllegalStateException("Layout definition for " + type + " is incomplete");
                 }
-                return new OrientationInfo(type, imageName, new DisplayArea(displayX, displayY, displayWidth, displayHeight));
+                return new OrientationInfo(type, selectedImage.name(), new DisplayArea(displayX, displayY, displayWidth, displayHeight));
+            }
+        }
+
+        private record ImageCandidate(String name, long area, boolean frameHint, boolean controlHint) {
+            static ImageCandidate from(String name, Deque<Context> contexts, java.util.function.Function<String, Path> resolver) {
+                boolean frameHint = false;
+                boolean controlHint = false;
+                for (Context ctx : contexts) {
+                    String lower = ctx.name.toLowerCase(Locale.ROOT);
+                    if (lower.contains("button") || lower.contains("control") || lower.contains("icon") || lower.contains("touch")) {
+                        controlHint = true;
+                    }
+                    if (lower.contains("device") || lower.contains("frame") || lower.contains("skin") || lower.contains("phone") || lower.contains("tablet")) {
+                        frameHint = true;
+                    }
+                }
+                String lowerName = name.toLowerCase(Locale.ROOT);
+                if (lowerName.contains("frame") || lowerName.contains("device") || lowerName.contains("shell") || lowerName.contains("body")) {
+                    frameHint = true;
+                }
+                if (lowerName.contains("button") || lowerName.contains("control") || lowerName.contains("icon")) {
+                    controlHint = true;
+                }
+                long area = computeArea(resolver.apply(name));
+                return new ImageCandidate(name, area, frameHint, controlHint);
+            }
+
+            private static long computeArea(Path imagePath) {
+                if (imagePath == null || !Files.isRegularFile(imagePath)) {
+                    return -1;
+                }
+                try {
+                    BufferedImage img = javax.imageio.ImageIO.read(imagePath.toFile());
+                    if (img == null) {
+                        return -1;
+                    }
+                    return (long) img.getWidth() * (long) img.getHeight();
+                } catch (IOException err) {
+                    return -1;
+                }
+            }
+
+            boolean isBetterThan(ImageCandidate other) {
+                if (other == null) {
+                    return true;
+                }
+                if (frameHint != other.frameHint) {
+                    return frameHint && !controlHint;
+                }
+                if (controlHint != other.controlHint) {
+                    return !controlHint;
+                }
+                long thisArea = Math.max(area, 0);
+                long otherArea = Math.max(other.area, 0);
+                if (thisArea != otherArea) {
+                    return thisArea > otherArea;
+                }
+                return name.compareTo(other.name) < 0;
             }
         }
     }
