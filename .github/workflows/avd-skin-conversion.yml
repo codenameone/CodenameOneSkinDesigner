@@ -2,7 +2,13 @@ name: AVD Skin Conversion
 
 on:
   push:
+    paths:
+      - '.github/workflows/avd-skin-conversion.yml'
+      - 'AvdSkinToCodenameOneSkin.java'
   pull_request:
+    paths:
+      - '.github/workflows/avd-skin-conversion.yml'
+      - 'AvdSkinToCodenameOneSkin.java'
 
 jobs:
   convert:
