@@ -1,5 +1,7 @@
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.awt.image.ImageObserver;
+import java.awt.image.PixelGrabber;
 import java.io.*;
 import java.nio.file.*;
 import java.time.LocalDateTime;
@@ -31,6 +33,8 @@ public class AvdSkinToCodenameOneSkin {
     private static final double TABLET_INCH_THRESHOLD = 6.5d;
 
     public static void main(String[] args) throws Exception {
+        System.setProperty("java.awt.headless", "true");
+
         if (args.length == 0 || args.length > 2) {
             System.err.println("Usage: java AvdSkinToCodenameOneSkin.java <avd-skin-dir> [output.skin]");
             System.exit(1);
@@ -132,10 +136,7 @@ public class AvdSkinToCodenameOneSkin {
             throw new IllegalStateException("Missing image '" + orientation.imageName() + "' for " + orientation.orientation());
         }
         try {
-            BufferedImage original = javax.imageio.ImageIO.read(imagePath.toFile());
-            if (original == null) {
-                throw new IllegalStateException("Failed to decode image " + imagePath);
-            }
+            BufferedImage original = readImage(imagePath);
             if (orientation.display().width() <= 0 || orientation.display().height() <= 0) {
                 throw new IllegalStateException("Invalid display dimensions for " + orientation.orientation());
             }
@@ -143,6 +144,53 @@ public class AvdSkinToCodenameOneSkin {
         } catch (IOException err) {
             throw new UncheckedIOException("Failed to read image " + imagePath, err);
         }
+    }
+
+    private static BufferedImage readImage(Path imagePath) throws IOException {
+        BufferedImage standard = javax.imageio.ImageIO.read(imagePath.toFile());
+        if (standard != null) {
+            return standard;
+        }
+
+        byte[] data = Files.readAllBytes(imagePath);
+        Image toolkitImage;
+        try {
+            toolkitImage = Toolkit.getDefaultToolkit().createImage(data);
+        } catch (HeadlessException err) {
+            throw new IllegalStateException("Unsupported image format for " + imagePath + " (headless toolkit)", err);
+        }
+        if (toolkitImage == null) {
+            throw new IllegalStateException("Unsupported image format for " + imagePath);
+        }
+        PixelGrabber grabber = new PixelGrabber(toolkitImage, 0, 0, -1, -1, true);
+        try {
+            grabber.grabPixels();
+        } catch (InterruptedException err) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while decoding " + imagePath, err);
+        }
+        if (grabber.getStatus() != ImageObserver.ALLBITS) {
+            throw new IllegalStateException("Failed to decode image " + imagePath);
+        }
+        int width = grabber.getWidth();
+        int height = grabber.getHeight();
+        if (width <= 0 || height <= 0) {
+            throw new IllegalStateException("Failed to decode image " + imagePath);
+        }
+        BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Object pixels = grabber.getPixels();
+        if (!(pixels instanceof int[] rgb)) {
+            throw new IllegalStateException("Unsupported pixel model in " + imagePath);
+        }
+        Graphics2D g = result.createGraphics();
+        try {
+            g.setComposite(AlphaComposite.Src);
+            g.drawImage(toolkitImage, 0, 0, null);
+            result.setRGB(0, 0, width, height, rgb, 0, width);
+        } finally {
+            g.dispose();
+        }
+        return result;
     }
 
     private static void writeEntry(ZipOutputStream zos, String name, BufferedImage image) throws IOException {
@@ -273,7 +321,7 @@ public class AvdSkinToCodenameOneSkin {
             String key = parts[0];
             String value = unquote(parts[1]);
             String ctxName = ctx.name.toLowerCase(Locale.ROOT);
-            if (ctxName.contains("image") && key.equalsIgnoreCase("name")) {
+            if (ctxName.contains("image") && isImageKey(key)) {
                 builder.considerImage(value, contextStack, this::resolveImagePath);
             } else if (ctxName.contains("display")) {
                 switch (key.toLowerCase(Locale.ROOT)) {
@@ -283,6 +331,11 @@ public class AvdSkinToCodenameOneSkin {
                     case "height" -> builder.displayHeight = parseInt(value);
                 }
             }
+        }
+
+        private boolean isImageKey(String key) {
+            String lower = key.toLowerCase(Locale.ROOT);
+            return lower.equals("name") || lower.equals("image") || lower.equals("filename");
         }
 
         private void pushContext(String name) {
@@ -409,18 +462,18 @@ public class AvdSkinToCodenameOneSkin {
                 boolean controlHint = false;
                 for (Context ctx : contexts) {
                     String lower = ctx.name.toLowerCase(Locale.ROOT);
-                    if (lower.contains("button") || lower.contains("control") || lower.contains("icon") || lower.contains("touch")) {
+                    if (lower.contains("button") || lower.contains("control") || lower.contains("icon") || lower.contains("touch") || lower.contains("shadow") || lower.contains("onion")) {
                         controlHint = true;
                     }
-                    if (lower.contains("device") || lower.contains("frame") || lower.contains("skin") || lower.contains("phone") || lower.contains("tablet")) {
+                    if (lower.contains("device") || lower.contains("frame") || lower.contains("skin") || lower.contains("phone") || lower.contains("tablet") || lower.contains("background") || lower.contains("back")) {
                         frameHint = true;
                     }
                 }
                 String lowerName = name.toLowerCase(Locale.ROOT);
-                if (lowerName.contains("frame") || lowerName.contains("device") || lowerName.contains("shell") || lowerName.contains("body")) {
+                if (lowerName.contains("frame") || lowerName.contains("device") || lowerName.contains("shell") || lowerName.contains("body") || lowerName.contains("background") || lowerName.contains("back") || lowerName.contains("fore")) {
                     frameHint = true;
                 }
-                if (lowerName.contains("button") || lowerName.contains("control") || lowerName.contains("icon")) {
+                if (lowerName.contains("button") || lowerName.contains("control") || lowerName.contains("icon") || lowerName.contains("shadow") || lowerName.contains("onion")) {
                     controlHint = true;
                 }
                 long area = computeArea(resolver.apply(name));
