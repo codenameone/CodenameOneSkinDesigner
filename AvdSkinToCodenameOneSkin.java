@@ -3,6 +3,7 @@ import java.awt.image.BufferedImage;
 import java.awt.image.ImageObserver;
 import java.awt.image.PixelGrabber;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -10,6 +11,11 @@ import java.util.*;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import javax.imageio.ImageIO;
+import javax.imageio.spi.IIORegistry;
+import javax.imageio.spi.ImageReaderSpi;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
 
 /**
  * Command line utility that converts a standard Android emulator skin into a
@@ -30,11 +36,13 @@ import java.util.zip.ZipOutputStream;
  */
 public class AvdSkinToCodenameOneSkin {
 
+    static {
+        ensureWebpSupport();
+    }
+
     private static final double TABLET_INCH_THRESHOLD = 6.5d;
 
     public static void main(String[] args) throws Exception {
-        System.setProperty("java.awt.headless", "true");
-
         if (args.length == 0 || args.length > 2) {
             System.err.println("Usage: java AvdSkinToCodenameOneSkin.java <avd-skin-dir> [output.skin]");
             System.exit(1);
@@ -147,9 +155,46 @@ public class AvdSkinToCodenameOneSkin {
     }
 
     private static BufferedImage readImage(Path imagePath) throws IOException {
-        BufferedImage standard = javax.imageio.ImageIO.read(imagePath.toFile());
+        String lowerName = imagePath.getFileName().toString().toLowerCase(Locale.ROOT);
+
+        BufferedImage standard = ImageIO.read(imagePath.toFile());
         if (standard != null) {
             return standard;
+        }
+
+        try (InputStream in = Files.newInputStream(imagePath)) {
+            BufferedImage viaStream = ImageIO.read(in);
+            if (viaStream != null) {
+                return viaStream;
+            }
+        }
+
+        try (ImageInputStream iis = ImageIO.createImageInputStream(Files.newInputStream(imagePath))) {
+            if (iis != null) {
+                Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+                if (readers.hasNext()) {
+                    ImageReader reader = readers.next();
+                    try {
+                        iis.seek(0);
+                        reader.setInput(iis, true, true);
+                        BufferedImage decoded = reader.read(0);
+                        if (decoded != null) {
+                            return decoded;
+                        }
+                    } finally {
+                        reader.dispose();
+                    }
+                }
+            }
+        }
+
+        BufferedImage viaDwebp = decodeWithDwebp(imagePath);
+        if (viaDwebp != null) {
+            return viaDwebp;
+        }
+
+        if (GraphicsEnvironment.isHeadless() && lowerName.endsWith(".webp")) {
+            throw new IllegalStateException("WebP decoding requires the 'dwebp' command when running headless. Install the 'webp' package and ensure 'dwebp' is on the PATH.");
         }
 
         byte[] data = Files.readAllBytes(imagePath);
@@ -191,6 +236,79 @@ public class AvdSkinToCodenameOneSkin {
             g.dispose();
         }
         return result;
+    }
+
+    private static BufferedImage decodeWithDwebp(Path imagePath) throws IOException {
+        String lower = imagePath.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".webp")) {
+            return null;
+        }
+        Path tempFile = null;
+        try {
+            tempFile = Files.createTempFile("avd-webp-", ".png");
+            Process process = new ProcessBuilder("dwebp", imagePath.toString(), "-o", tempFile.toString())
+                    .redirectErrorStream(true)
+                    .start();
+            String output;
+            try (InputStream stdout = process.getInputStream()) {
+                output = new String(stdout.readAllBytes(), StandardCharsets.UTF_8).trim();
+            }
+            int exit = process.waitFor();
+            if (exit != 0) {
+                throw new IOException("dwebp exited with status " + exit + (output.isEmpty() ? "" : ": " + output));
+            }
+            try (InputStream pngStream = Files.newInputStream(tempFile)) {
+                BufferedImage converted = ImageIO.read(pngStream);
+                if (converted == null) {
+                    throw new IOException("dwebp produced an unreadable PNG for " + imagePath);
+                }
+                return converted;
+            }
+        } catch (IOException err) {
+            String message = err.getMessage();
+            if (message != null && message.contains("No such file or directory")) {
+                System.err.println("Warning: dwebp command not available. Install the 'webp' package to enable WebP decoding.");
+                return null;
+            }
+            throw err;
+        } catch (InterruptedException err) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while running dwebp for " + imagePath, err);
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private static boolean ensureWebpSupport() {
+        try {
+            ImageIO.setUseCache(false);
+            ImageIO.scanForPlugins();
+            if (hasWebpReader()) {
+                return true;
+            }
+            Class<?> spiClass = Class.forName("jdk.imageio.webp.WebPImageReaderSpi");
+            Object instance = spiClass.getDeclaredConstructor().newInstance();
+            if (instance instanceof ImageReaderSpi spi) {
+                IIORegistry registry = IIORegistry.getDefaultInstance();
+                registry.registerServiceProvider(spi);
+            }
+        } catch (ClassNotFoundException err) {
+            return hasWebpReader();
+        } catch (ReflectiveOperationException | LinkageError err) {
+            System.err.println("Warning: Unable to initialise WebP decoder: " + err.getMessage());
+            return hasWebpReader();
+        }
+        return hasWebpReader();
+    }
+
+    private static boolean hasWebpReader() {
+        return ImageIO.getImageReadersBySuffix("webp").hasNext()
+                || ImageIO.getImageReadersByMIMEType("image/webp").hasNext();
     }
 
     private static void writeEntry(ZipOutputStream zos, String name, BufferedImage image) throws IOException {
