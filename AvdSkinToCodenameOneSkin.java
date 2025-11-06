@@ -274,6 +274,10 @@ public class AvdSkinToCodenameOneSkin {
         private final Deque<Context> contextStack = new ArrayDeque<>();
         private final Path skinDirectory;
         private final Path layoutParent;
+        private Integer baseDisplayX;
+        private Integer baseDisplayY;
+        private Integer baseDisplayWidth;
+        private Integer baseDisplayHeight;
 
         LayoutParser(Path layoutFile, Path skinDirectory) {
             this.skinDirectory = skinDirectory;
@@ -296,10 +300,10 @@ public class AvdSkinToCodenameOneSkin {
                 }
             }
             OrientationInfo portrait = builders.containsKey(OrientationType.PORTRAIT)
-                    ? builders.get(OrientationType.PORTRAIT).build(OrientationType.PORTRAIT)
+                    ? builders.get(OrientationType.PORTRAIT).build(OrientationType.PORTRAIT, this)
                     : null;
             OrientationInfo landscape = builders.containsKey(OrientationType.LANDSCAPE)
-                    ? builders.get(OrientationType.LANDSCAPE).build(OrientationType.LANDSCAPE)
+                    ? builders.get(OrientationType.LANDSCAPE).build(OrientationType.LANDSCAPE, this)
                     : null;
             return new LayoutInfo(portrait, landscape);
         }
@@ -310,25 +314,49 @@ public class AvdSkinToCodenameOneSkin {
                 return;
             }
             OrientationType orientation = findCurrentOrientation();
-            if (orientation == null) {
-                return;
-            }
-            OrientationInfoBuilder builder = builders.computeIfAbsent(orientation, o -> new OrientationInfoBuilder());
+
             String[] parts = splitKeyValue(line);
             if (parts == null) {
                 return;
             }
             String key = parts[0];
             String value = unquote(parts[1]);
+
+            if (orientation == null && isInDeviceDisplayContext()) {
+                switch (key.toLowerCase(Locale.ROOT)) {
+                    case "x" -> baseDisplayX = parseInt(value);
+                    case "y" -> baseDisplayY = parseInt(value);
+                    case "width" -> baseDisplayWidth = parseInt(value);
+                    case "height" -> baseDisplayHeight = parseInt(value);
+                }
+                return;
+            }
+
+            if (orientation == null) {
+                if (ctx.isPartBlock && key.equalsIgnoreCase("name")) {
+                    ctx.devicePart = value.equalsIgnoreCase("device");
+                }
+                return;
+            }
+            OrientationInfoBuilder builder = builders.computeIfAbsent(orientation, o -> new OrientationInfoBuilder());
             String ctxName = ctx.name.toLowerCase(Locale.ROOT);
-            if (ctxName.contains("image") && isImageKey(key)) {
+            if (ctx.isPartBlock && key.equalsIgnoreCase("name")) {
+                ctx.devicePart = value.equalsIgnoreCase("device");
+            }
+            if (isImageKey(key) && shouldTreatAsImage(ctx, key)) {
                 builder.considerImage(value, contextStack, this::resolveImagePath);
             } else if (ctxName.contains("display")) {
                 switch (key.toLowerCase(Locale.ROOT)) {
-                    case "x" -> builder.displayX = parseInt(value);
-                    case "y" -> builder.displayY = parseInt(value);
-                    case "width" -> builder.displayWidth = parseInt(value);
-                    case "height" -> builder.displayHeight = parseInt(value);
+                    case "x" -> builder.displayXOverride = parseInt(value);
+                    case "y" -> builder.displayYOverride = parseInt(value);
+                    case "width" -> builder.displayWidthOverride = parseInt(value);
+                    case "height" -> builder.displayHeightOverride = parseInt(value);
+                }
+            } else if (isInDevicePartContext()) {
+                switch (key.toLowerCase(Locale.ROOT)) {
+                    case "x" -> builder.offsetX = parseInt(value);
+                    case "y" -> builder.offsetY = parseInt(value);
+                    case "rotation" -> builder.rotation = parseInt(value);
                 }
             }
         }
@@ -336,6 +364,23 @@ public class AvdSkinToCodenameOneSkin {
         private boolean isImageKey(String key) {
             String lower = key.toLowerCase(Locale.ROOT);
             return lower.equals("name") || lower.equals("image") || lower.equals("filename");
+        }
+
+        private boolean shouldTreatAsImage(Context ctx, String key) {
+            if (!key.equalsIgnoreCase("name")) {
+                return true;
+            }
+            String ctxName = ctx.name.toLowerCase(Locale.ROOT);
+            return ctxName.contains("image")
+                    || ctxName.contains("background")
+                    || ctxName.contains("foreground")
+                    || ctxName.contains("frame")
+                    || ctxName.contains("skin")
+                    || ctxName.contains("device")
+                    || ctxName.contains("phone")
+                    || ctxName.contains("tablet")
+                    || ctxName.contains("onion")
+                    || ctxName.contains("overlay");
         }
 
         private void pushContext(String name) {
@@ -432,14 +477,53 @@ public class AvdSkinToCodenameOneSkin {
             return null;
         }
 
-        private record Context(String name, OrientationType orientation) {}
+        private boolean isInDeviceDisplayContext() {
+            Iterator<Context> it = contextStack.iterator();
+            if (!it.hasNext()) {
+                return false;
+            }
+            Context top = it.next();
+            if (!top.name.equalsIgnoreCase("display")) {
+                return false;
+            }
+            if (!it.hasNext()) {
+                return false;
+            }
+            Context parent = it.next();
+            return parent.name.equalsIgnoreCase("device");
+        }
+
+        private boolean isInDevicePartContext() {
+            for (Context ctx : contextStack) {
+                if (ctx.isPartBlock && ctx.devicePart) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static final class Context {
+            final String name;
+            final OrientationType orientation;
+            final boolean isPartBlock;
+            boolean devicePart;
+
+            Context(String name, OrientationType orientation) {
+                this.name = name;
+                this.orientation = orientation;
+                this.isPartBlock = name != null && name.toLowerCase(Locale.ROOT).startsWith("part");
+            }
+        }
 
         private static class OrientationInfoBuilder {
             ImageCandidate selectedImage;
-            Integer displayX;
-            Integer displayY;
-            Integer displayWidth;
-            Integer displayHeight;
+            Integer displayXOverride;
+            Integer displayYOverride;
+            Integer displayWidthOverride;
+            Integer displayHeightOverride;
+            Integer offsetX;
+            Integer offsetY;
+            Integer rotation;
 
             void considerImage(String name, Deque<Context> contexts, java.util.function.Function<String, Path> resolver) {
                 ImageCandidate candidate = ImageCandidate.from(name, contexts, resolver);
@@ -448,11 +532,34 @@ public class AvdSkinToCodenameOneSkin {
                 }
             }
 
-            OrientationInfo build(OrientationType type) {
-                if (selectedImage == null || displayX == null || displayY == null || displayWidth == null || displayHeight == null) {
+            OrientationInfo build(OrientationType type, LayoutParser parser) {
+                if (selectedImage == null) {
                     throw new IllegalStateException("Layout definition for " + type + " is incomplete");
                 }
-                return new OrientationInfo(type, selectedImage.name(), new DisplayArea(displayX, displayY, displayWidth, displayHeight));
+                int baseX = parser.baseDisplayX != null ? parser.baseDisplayX : 0;
+                int baseY = parser.baseDisplayY != null ? parser.baseDisplayY : 0;
+                Integer widthSource = displayWidthOverride != null ? displayWidthOverride : parser.baseDisplayWidth;
+                Integer heightSource = displayHeightOverride != null ? displayHeightOverride : parser.baseDisplayHeight;
+                if (widthSource == null || heightSource == null) {
+                    throw new IllegalStateException("Layout definition for " + type + " is missing display dimensions");
+                }
+                int finalWidth = widthSource;
+                int finalHeight = heightSource;
+                int normalizedRotation = rotation != null ? Math.floorMod(rotation, 4) : 0;
+                if ((normalizedRotation & 1) == 1) {
+                    int tmp = finalWidth;
+                    finalWidth = finalHeight;
+                    finalHeight = tmp;
+                }
+                int finalX = displayXOverride != null ? displayXOverride : baseX;
+                int finalY = displayYOverride != null ? displayYOverride : baseY;
+                if (offsetX != null) {
+                    finalX += offsetX;
+                }
+                if (offsetY != null) {
+                    finalY += offsetY;
+                }
+                return new OrientationInfo(type, selectedImage.name(), new DisplayArea(finalX, finalY, finalWidth, finalHeight));
             }
         }
 
