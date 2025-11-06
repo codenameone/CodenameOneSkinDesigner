@@ -46,3 +46,9 @@ jobs:
         run: |
           test -f build/nexus_10.skin
           unzip -l build/nexus_10.skin
+
+      - name: Upload converted skin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-10-codenameone-skin
+          path: build/nexus_10.skin
