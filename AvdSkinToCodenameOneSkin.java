@@ -5,12 +5,14 @@ import java.awt.image.PixelGrabber;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import java.util.stream.Stream;
 import javax.imageio.ImageIO;
 import javax.imageio.spi.IIORegistry;
 import javax.imageio.spi.ImageReaderSpi;
@@ -42,38 +44,53 @@ public class AvdSkinToCodenameOneSkin {
 
     private static final double TABLET_INCH_THRESHOLD = 6.5d;
 
-    public static void main(String[] args) throws Exception {
-        if (args.length == 0 || args.length > 2) {
-            System.err.println("Usage: java AvdSkinToCodenameOneSkin.java <avd-skin-dir> [output.skin]");
-            System.exit(1);
-        }
+    private static void printUsage() {
+        System.err.println("""
+Usage:
+  java AvdSkinToCodenameOneSkin.java <avd-skin-dir> [output.skin]
+  java AvdSkinToCodenameOneSkin.java --github <repo-url> [--ref <git-ref>] [--output <directory>]
+""");
+    }
 
-        Path skinDirectory = Paths.get(args[0]).toAbsolutePath().normalize();
-        if (!Files.isDirectory(skinDirectory)) {
-            error("Input path %s is not a directory".formatted(skinDirectory));
-        }
-
-        Path outputFile;
-        if (args.length == 2) {
-            outputFile = Paths.get(args[1]).toAbsolutePath().normalize();
+    private static Path defaultOutputPath(Path skinDirectory) {
+        Path absolute = skinDirectory.toAbsolutePath().normalize();
+        Path parent = absolute.getParent();
+        String baseName;
+        Path fileName = absolute.getFileName();
+        if (fileName == null) {
+            baseName = "skin";
         } else {
-            outputFile = skinDirectory.getParent().resolve(skinDirectory.getFileName().toString() + ".skin");
+            baseName = fileName.toString();
+            if (baseName.isEmpty()) {
+                baseName = "skin";
+            }
+        }
+        Path unresolved = parent == null
+                ? Paths.get(baseName + ".skin")
+                : parent.resolve(baseName + ".skin");
+        return unresolved.toAbsolutePath().normalize();
+    }
+
+    private static Path convertSkinDirectory(Path skinDirectory, Path outputFile) throws IOException {
+        Path normalizedInput = skinDirectory.toAbsolutePath().normalize();
+        if (!Files.isDirectory(normalizedInput)) {
+            throw new IllegalArgumentException("Input path " + normalizedInput + " is not a directory");
         }
 
-        if (Files.exists(outputFile)) {
-            error("Output file %s already exists".formatted(outputFile));
+        Path normalizedOutput = outputFile.toAbsolutePath().normalize();
+        if (Files.exists(normalizedOutput)) {
+            throw new IllegalStateException("Output file " + normalizedOutput + " already exists");
         }
 
-        Path layoutFile = findLayoutFile(skinDirectory);
-        LayoutInfo layoutInfo = LayoutInfo.parse(layoutFile, skinDirectory);
-        HardwareInfo hardwareInfo = HardwareInfo.parse(skinDirectory.resolve("hardware.ini"));
-
+        Path layoutFile = findLayoutFile(normalizedInput);
+        LayoutInfo layoutInfo = LayoutInfo.parse(layoutFile, normalizedInput);
         if (!layoutInfo.hasBothOrientations()) {
-            error("Layout file must define portrait and landscape display information");
+            throw new IllegalStateException("Layout file must define portrait and landscape display information");
         }
+        HardwareInfo hardwareInfo = HardwareInfo.parse(normalizedInput.resolve("hardware.ini"));
 
-        DeviceImages portraitImages = buildDeviceImages(skinDirectory, layoutInfo.portrait());
-        DeviceImages landscapeImages = buildDeviceImages(skinDirectory, layoutInfo.landscape());
+        DeviceImages portraitImages = buildDeviceImages(normalizedInput, layoutInfo.portrait());
+        DeviceImages landscapeImages = buildDeviceImages(normalizedInput, layoutInfo.landscape());
 
         boolean isTablet = hardwareInfo.isTabletLike(TABLET_INCH_THRESHOLD);
         String overrideNames = isTablet ? "tablet,android,android-tablet" : "phone,android,android-phone";
@@ -91,19 +108,258 @@ public class AvdSkinToCodenameOneSkin {
         props.setProperty("pixelRatio", String.format(Locale.US, "%.6f", hardwareInfo.pixelRatio()));
         props.setProperty("overrideNames", overrideNames);
 
-        Path parent = outputFile.getParent();
+        Path parent = normalizedOutput.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(outputFile))) {
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(normalizedOutput))) {
             writeEntry(zos, "skin.png", portraitImages.withTransparentDisplay());
             writeEntry(zos, "skin_l.png", landscapeImages.withTransparentDisplay());
             writeEntry(zos, "skin_map.png", portraitImages.overlay());
             writeEntry(zos, "skin_map_l.png", landscapeImages.overlay());
             writeProperties(zos, props);
         }
+        return normalizedOutput;
+    }
 
-        System.out.println("Codename One skin created at: " + outputFile);
+    private static ConversionSummary convertGithubRepository(String repoUrl, String ref, Path outputDir)
+            throws IOException, InterruptedException {
+        Path tempDir = Files.createTempDirectory("avd-github-");
+        try {
+            Path repoDir = cloneGitRepository(repoUrl, ref, tempDir);
+            List<Path> skinDirectories = discoverSkinDirectories(repoDir);
+            if (skinDirectories.isEmpty()) {
+                throw new IllegalStateException("No Android skin directories found in repository " + repoUrl);
+            }
+            Files.createDirectories(outputDir);
+            List<Path> generated = new ArrayList<>();
+            List<ConversionFailure> failures = new ArrayList<>();
+            for (Path skinDir : skinDirectories) {
+                Path relative = repoDir.relativize(skinDir);
+                Path targetFile = uniqueOutputFile(outputDir, relative);
+                try {
+                    Path created = convertSkinDirectory(skinDir, targetFile);
+                    generated.add(created);
+                    System.out.println("Converted " + relative + " -> " + created);
+                } catch (Exception err) {
+                    String message = err.getMessage() != null ? err.getMessage() : err.toString();
+                    failures.add(new ConversionFailure(relative.toString(), message));
+                    System.err.println("Failed to convert " + relative + ": " + message);
+                }
+            }
+            if (generated.isEmpty()) {
+                String details = failures.isEmpty() ? "" : " First failure: " + failures.get(0).message();
+                throw new IllegalStateException("Unable to convert any skins from repository " + repoUrl + "." + details);
+            }
+            return new ConversionSummary(Collections.unmodifiableList(new ArrayList<>(generated)),
+                    Collections.unmodifiableList(new ArrayList<>(failures)));
+        } finally {
+            deleteRecursively(tempDir);
+        }
+    }
+
+    private static Path cloneGitRepository(String repoUrl, String ref, Path workDir)
+            throws IOException, InterruptedException {
+        Path destination = workDir.resolve("repo");
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.add("clone");
+        command.add("--depth");
+        command.add("1");
+        if (ref != null && !ref.isBlank()) {
+            command.add("--branch");
+            command.add(ref);
+        }
+        command.add(repoUrl);
+        command.add(destination.toString());
+
+        Process process;
+        try {
+            process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
+        } catch (IOException err) {
+            String message = err.getMessage();
+            if (message != null && message.contains("No such file or directory")) {
+                throw new IOException("The 'git' command is required to clone GitHub repositories.", err);
+            }
+            throw err;
+        }
+
+        String output;
+        try (InputStream stdout = process.getInputStream()) {
+            output = new String(stdout.readAllBytes(), StandardCharsets.UTF_8).trim();
+        }
+        int exit = process.waitFor();
+        if (exit != 0) {
+            if (!output.isEmpty()) {
+                throw new IOException("Failed to clone repository: " + output);
+            }
+            throw new IOException("Failed to clone repository " + repoUrl + ": git exited with status " + exit);
+        }
+        return destination;
+    }
+
+    private static List<Path> discoverSkinDirectories(Path root) throws IOException {
+        List<Path> skinDirectories = new ArrayList<>();
+        try (Stream<Path> stream = Files.walk(root)) {
+            stream.filter(Files::isDirectory)
+                    .filter(path -> !path.equals(root))
+                    .filter(path -> !isIgnoredDirectory(path))
+                    .forEach(path -> {
+                        if (looksLikeSkinDirectory(path)) {
+                            skinDirectories.add(path);
+                        }
+                    });
+        }
+        return skinDirectories;
+    }
+
+    private static boolean isIgnoredDirectory(Path path) {
+        for (Path component : path) {
+            if (component == null) {
+                continue;
+            }
+            String name = component.toString();
+            if (name.equals(".git") || name.equals(".hg") || name.equals(".svn")
+                    || name.equals("node_modules") || name.equals(".idea")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean looksLikeSkinDirectory(Path directory) {
+        try {
+            findLayoutFile(directory);
+            return true;
+        } catch (IllegalStateException | UncheckedIOException err) {
+            return false;
+        }
+    }
+
+    private static Path uniqueOutputFile(Path outputDir, Path relativeSkinDir) {
+        String baseName = sanitizeRelativePath(relativeSkinDir);
+        Path candidate = outputDir.resolve(baseName + ".skin").toAbsolutePath().normalize();
+        int counter = 1;
+        while (Files.exists(candidate)) {
+            candidate = outputDir.resolve(baseName + "-" + counter + ".skin").toAbsolutePath().normalize();
+            counter++;
+        }
+        return candidate;
+    }
+
+    private static String sanitizeRelativePath(Path relative) {
+        String raw = relative == null ? "" : relative.toString();
+        raw = raw.replace('\\', '/');
+        if (raw.isEmpty()) {
+            return "skin";
+        }
+        String sanitized = raw.replace('/', '_');
+        sanitized = sanitized.replaceAll("[^A-Za-z0-9._-]", "_");
+        sanitized = sanitized.replaceAll("_+", "_");
+        sanitized = sanitized.replaceAll("^_+", "");
+        sanitized = sanitized.replaceAll("_+$", "");
+        if (sanitized.isEmpty()) {
+            sanitized = "skin";
+        }
+        return sanitized;
+    }
+
+    private static void deleteRecursively(Path root) {
+        if (root == null || !Files.exists(root)) {
+            return;
+        }
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    Files.deleteIfExists(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                    Files.deleteIfExists(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException ignored) {
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length == 0) {
+            printUsage();
+            System.exit(1);
+        }
+
+        if ("--github".equalsIgnoreCase(args[0])) {
+            if (args.length < 2) {
+                printUsage();
+                System.exit(1);
+            }
+            String repoUrl = args[1];
+            String ref = null;
+            Path outputDir = Paths.get("converted-skins").toAbsolutePath().normalize();
+            for (int i = 2; i < args.length; i++) {
+                String arg = args[i];
+                switch (arg) {
+                    case "--ref", "--branch" -> {
+                        if (i + 1 >= args.length) {
+                            error(arg + " requires an argument");
+                        }
+                        ref = args[++i];
+                    }
+                    case "--output" -> {
+                        if (i + 1 >= args.length) {
+                            error("--output requires an argument");
+                        }
+                        outputDir = Paths.get(args[++i]).toAbsolutePath().normalize();
+                    }
+                    default -> {
+                        printUsage();
+                        System.exit(1);
+                    }
+                }
+            }
+            try {
+                ConversionSummary summary = convertGithubRepository(repoUrl, ref, outputDir);
+                System.out.println("Generated " + summary.generatedSkins().size() + " Codename One skin file(s) in " + outputDir);
+                if (!summary.failures().isEmpty()) {
+                    System.err.println("The following directories could not be converted:");
+                    for (ConversionFailure failure : summary.failures()) {
+                        System.err.println(" - " + failure.relativePath() + ": " + failure.message());
+                    }
+                }
+            } catch (Exception err) {
+                error(err.getMessage() != null ? err.getMessage() : err.toString());
+            }
+            return;
+        }
+
+        if (args.length > 2) {
+            printUsage();
+            System.exit(1);
+        }
+
+        Path skinDirectory = Paths.get(args[0]).toAbsolutePath().normalize();
+        Path outputFile = args.length == 2
+                ? Paths.get(args[1]).toAbsolutePath().normalize()
+                : defaultOutputPath(skinDirectory);
+
+        try {
+            Path generated = convertSkinDirectory(skinDirectory, outputFile);
+            System.out.println("Codename One skin created at: " + generated);
+        } catch (Exception err) {
+            error(err.getMessage() != null ? err.getMessage() : err.toString());
+        }
+    }
+
+    private record ConversionSummary(List<Path> generatedSkins, List<ConversionFailure> failures) {
+    }
+
+    private record ConversionFailure(String relativePath, String message) {
     }
 
     private static Path findLayoutFile(Path skinDirectory) {
